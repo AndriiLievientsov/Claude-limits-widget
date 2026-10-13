@@ -228,6 +228,42 @@ def format_reset(resets_at, now: float | None = None) -> str:
     return f"{round(hours / 24)} дн"
 
 
+# ---------- темп и прогноз ----------
+DURATIONS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400, "seven_day_opus": 7 * 86400,
+             "seven_day_sonnet": 7 * 86400}
+MIN_ELAPSED_SHARE = 0.05  # раньше 5% окна прогноз слишком шумный
+
+
+def window_elapsed(w: Window, now: float | None = None):
+    """(прошло секунд, длина окна) или None, если длина окна или время сброса неизвестны."""
+    dur = DURATIONS.get(w.kind)
+    if not dur or w.resets_at is None:
+        return None
+    now = now if now is not None else time.time()
+    return min(max(dur - (w.resets_at - now), 0.0), float(dur)), dur
+
+
+def pace_percent(w: Window, now: float | None = None):
+    """Где была бы шкала при ровном расходе: доля прошедшего времени окна, 0–100."""
+    el = window_elapsed(w, now)
+    return None if el is None else el[0] / el[1] * 100
+
+
+def forecast_exhaust(w: Window, now: float | None = None):
+    """Когда лимит кончится при среднем темпе с начала окна (unix-секунды) или None, если хватит до сброса."""
+    now = now if now is not None else time.time()
+    el = window_elapsed(w, now)
+    if el is None or w.percent <= 0:
+        return None
+    elapsed, dur = el
+    if w.percent >= 100:
+        return now
+    if elapsed < dur * MIN_ELAPSED_SHARE:
+        return None
+    at = now + (100 - w.percent) * elapsed / w.percent
+    return at if at < w.resets_at else None
+
+
 GREEN = "#30a46c"
 
 

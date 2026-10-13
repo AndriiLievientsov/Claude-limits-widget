@@ -168,6 +168,33 @@ class RefreshLogin(unittest.TestCase):
             self.assertTrue(d.auth_error)
 
 
+class Pace(unittest.TestCase):
+    H = 3600
+
+    def win(self, pct, left, kind="five_hour"):
+        return core.Window(kind, pct, NOW + left)
+
+    def test_pace_is_share_of_elapsed_time(self):
+        self.assertAlmostEqual(core.pace_percent(self.win(10, 4 * self.H), NOW), 20)
+        self.assertAlmostEqual(core.pace_percent(self.win(10, 3.5 * 86400, "seven_day"), NOW), 50)
+        self.assertIsNone(core.pace_percent(core.Window("five_hour", 10, None), NOW))
+        self.assertIsNone(core.pace_percent(self.win(10, self.H, "spend_limit"), NOW))
+        self.assertEqual(core.pace_percent(self.win(10, 9 * self.H), NOW), 0)  # странный сброс: не уходим в минус
+
+    def test_forecast_when_too_fast(self):
+        # прошёл 1 ч из 5, израсходовано 50% → оставшиеся 50% уйдут ещё за 1 ч
+        self.assertAlmostEqual(core.forecast_exhaust(self.win(50, 4 * self.H), NOW), NOW + self.H)
+
+    def test_no_forecast_when_enough_or_unknown(self):
+        self.assertIsNone(core.forecast_exhaust(self.win(10, 4 * self.H), NOW))  # хватит до сброса
+        self.assertIsNone(core.forecast_exhaust(self.win(0, 4 * self.H), NOW))
+        self.assertIsNone(core.forecast_exhaust(self.win(5, 5 * self.H - 60), NOW))  # слишком рано
+        self.assertIsNone(core.forecast_exhaust(core.Window("five_hour", 50, None), NOW))
+
+    def test_exhausted_now(self):
+        self.assertEqual(core.forecast_exhaust(self.win(100, self.H), NOW), NOW)
+
+
 class Files(unittest.TestCase):
     def test_snapshot_roundtrip_and_errors(self):
         with tempfile.TemporaryDirectory() as t:
