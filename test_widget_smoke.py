@@ -124,6 +124,23 @@ class Smoke(unittest.TestCase):
         self.w.render()
         self.assertIn("$100 / $100", " | ".join(self.texts()))
 
+    def test_pace_marker_and_forecast(self):
+        fast = core.Data([core.Window("five_hour", 60, time.time() + 4 * 3600)], updated_at=time.time())
+        self.w.data = fast
+        for view in ("bars", "rings"):
+            self.w.cfg.update(view=view, compact=False, pace=True)
+            self.w.canvas.calls.clear()
+            self.w.render()
+            lines = [n for n, a, k in self.w.canvas.calls if n == "create_line"]
+            self.assertTrue(lines, view)
+        self.w.cfg["view"] = "bars"
+        self.w.render()
+        self.assertIn("кончится", " | ".join(self.texts()))
+        self.w.cfg["pace"] = False
+        self.w.canvas.calls.clear()
+        self.w.render()
+        self.assertNotIn("кончится", " | ".join(self.texts()))
+
     def test_click_toggles_reset_format_and_drag_does_not(self):
         e = types.SimpleNamespace(x_root=100, y_root=100)
         before = self.w.cfg["reset_abs"]
@@ -137,7 +154,7 @@ class Smoke(unittest.TestCase):
         self.assertEqual(mid, self.w.cfg["reset_abs"])
 
     def test_menu_actions(self):
-        for key in ("compact", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
+        for key in ("compact", "pace", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
             self.w._vars[key].set(not self.w.cfg[key])
             self.w._toggled(key)
         for key, value in (("view", "rings"), ("size", "L"), ("theme", "light"), ("accent", "Синий"),

@@ -4,6 +4,7 @@
 Правая кнопка: меню (источник, вид, размер, тема, компактный режим и т. д.).
 """
 import json
+import math
 import queue
 import sys
 import threading
@@ -20,7 +21,7 @@ DEFAULTS = {
     "hidden": [], "shown_extra": [], "show_breakdown": True,
     "view": "bars", "size": "M", "theme": "auto", "accent": "Зелёный",
     "compact": False, "pulse": True, "snap": True, "ghost": False,
-    "reset_abs": False, "rounded": False, "auto_login": True,
+    "reset_abs": False, "rounded": False, "auto_login": True, "pace": True,
 }
 
 PALETTES = {
@@ -258,6 +259,7 @@ class Widget:
         self._check(m, "Компактный режим (разворачивается при наведении)", "compact")
         self._check(m, "Время сброса: точное («в 14:40»)", "reset_abs")
         self._check(m, "Неделя по продуктам", "show_breakdown")
+        self._check(m, "Темп и прогноз исчерпания", "pace")
         self._check(m, "Пульсация при 90% и выше", "pulse")
         self._check(m, "Автоматически обновлять вход в Live", "auto_login")
         m.add_separator()
@@ -602,12 +604,21 @@ class Widget:
             return core.format_reset_abs(w.resets_at, now)
         return core.format_reset(w.resets_at, now)
 
+    def _forecast_text(self, w, now: float) -> str:
+        if not self.cfg["pace"] or w.percent >= 100:
+            return ""
+        at = core.forecast_exhaust(w, now)
+        return f"При таком темпе кончится {core.format_reset_abs(at, now)}" if at else ""
+
     def _value_text(self, w) -> str:
         if w.limit_dollars is not None and w.used_dollars is not None:
             return f"${w.used_dollars:.0f} / ${w.limit_dollars:.0f}"
         return f"{max(w.percent, 0):.0f}%"
 
-    def _bar(self, x1, y, x2, height, pct, color) -> None:
+    def _pace(self, w, now: float):
+        return core.pace_percent(w, now) if self.cfg["pace"] else None
+
+    def _bar(self, x1, y, x2, height, pct, color, pace=None) -> None:
         c, pal = self.canvas, self.pal
         c.create_rectangle(x1, y, x2, y + height, fill=pal["track"], outline="")
         fill_w = (x2 - x1) * min(max(pct, 0), 100) / 100
@@ -617,6 +628,10 @@ class Widget:
             for t in (70, 90):
                 tx = x1 + (x2 - x1) * t / 100
                 c.create_line(tx, y, tx, y + height, fill=pal["bg"])
+        if pace is not None:  # где была бы шкала при ровном расходе
+            tx = x1 + (x2 - x1) * min(max(pace, 0), 100) / 100
+            c.create_line(tx, y - self.px(3), tx, y + height + self.px(3), fill=self._tint(pal["fg"]),
+                          width=max(self.px(2), 1))
 
     def render(self) -> None:
         cfg, d, pal, c = self.cfg, self.data, self.pal, self.canvas
@@ -678,8 +693,12 @@ class Widget:
             if reset:
                 right += f" · {reset}"
             c.create_text(W - PAD, y, anchor="ne", text=right, fill=col, font=self.font(9, True))
-            self._bar(PAD, y + px(20), W - PAD, px(6), w.percent, col)
+            self._bar(PAD, y + px(20), W - PAD, px(6), w.percent, col, self._pace(w, now))
             y += px(38)
+            warn = self._forecast_text(w, now)
+            if warn:
+                c.create_text(PAD, y - px(10), anchor="nw", text=warn, fill=self._tint(AMBER), font=self.font(8))
+                y += px(14)
         return y
 
     def _draw_rings(self, visible, y: int, now: float) -> int:
@@ -698,6 +717,14 @@ class Widget:
             extent = -min(max(w.percent, 0), 99.9) * 3.6
             if extent < 0:
                 c.create_arc(x1, y1, x2, y2, start=90, extent=extent, style="arc", outline=col, width=thick)
+            pace = self._pace(w, now)
+            if pace is not None:  # метка ровного темпа поперёк кольца
+                a = math.radians(90 - min(max(pace, 0), 100) * 3.6)
+                rin, rout = diam / 2 - thick / 2 - px(1), diam / 2 + thick / 2 + px(1)
+                cy = (y1 + y2) / 2
+                c.create_line(cx + rin * math.cos(a), cy - rin * math.sin(a),
+                              cx + rout * math.cos(a), cy - rout * math.sin(a),
+                              fill=self._tint(pal["fg"]), width=max(px(2), 1))
             center = f"${w.used_dollars:.0f}" if w.used_dollars is not None and w.limit_dollars is not None \
                 else f"{max(w.percent, 0):.0f}%"
             c.create_text(cx, (y1 + y2) / 2, text=center, fill=col, font=self.font(11, True))
