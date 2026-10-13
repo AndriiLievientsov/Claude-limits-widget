@@ -168,6 +168,113 @@ class RefreshLogin(unittest.TestCase):
             self.assertTrue(d.auth_error)
 
 
+class Pace(unittest.TestCase):
+    H = 3600
+
+    def win(self, pct, left, kind="five_hour"):
+        return core.Window(kind, pct, NOW + left)
+
+    def test_pace_is_share_of_elapsed_time(self):
+        self.assertAlmostEqual(core.pace_percent(self.win(10, 4 * self.H), NOW), 20)
+        self.assertAlmostEqual(core.pace_percent(self.win(10, 3.5 * 86400, "seven_day"), NOW), 50)
+        self.assertIsNone(core.pace_percent(core.Window("five_hour", 10, None), NOW))
+        self.assertIsNone(core.pace_percent(self.win(10, self.H, "spend_limit"), NOW))
+        self.assertEqual(core.pace_percent(self.win(10, 9 * self.H), NOW), 0)  # странный сброс: не уходим в минус
+
+    def test_forecast_when_too_fast(self):
+        # прошёл 1 ч из 5, израсходовано 50% → оставшиеся 50% уйдут ещё за 1 ч
+        self.assertAlmostEqual(core.forecast_exhaust(self.win(50, 4 * self.H), NOW), NOW + self.H)
+
+    def test_no_forecast_when_enough_or_unknown(self):
+        self.assertIsNone(core.forecast_exhaust(self.win(10, 4 * self.H), NOW))  # хватит до сброса
+        self.assertIsNone(core.forecast_exhaust(self.win(0, 4 * self.H), NOW))
+        self.assertIsNone(core.forecast_exhaust(self.win(5, 5 * self.H - 60), NOW))  # слишком рано
+        self.assertIsNone(core.forecast_exhaust(core.Window("five_hour", 50, None), NOW))
+
+    def test_exhausted_now(self):
+        self.assertEqual(core.forecast_exhaust(self.win(100, self.H), NOW), NOW)
+
+
+class History(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "h.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def data(self, pct, t):
+        return core.Data([core.Window("five_hour", pct, NOW + 3600)], updated_at=t)
+
+    def test_record_shape_and_skips(self):
+        rec = core.history_record(self.data(12.345, NOW))
+        self.assertEqual(rec, {"t": NOW, "w": {"five_hour": [12.35, NOW + 3600]}})
+        self.assertIsNone(core.history_record(core.Data(error="x")))
+        self.assertIsNone(core.history_record(core.Data([core.Window("five_hour", 1, None)], error="429")))
+
+    def test_should_record(self):
+        a = core.history_record(self.data(10, NOW))
+        self.assertTrue(core.should_record(a, None))
+        self.assertFalse(core.should_record(a, a))  # тот же снимок
+        self.assertFalse(core.should_record(core.history_record(self.data(10, NOW + 60)), a))  # без изменений
+        self.assertTrue(core.should_record(core.history_record(self.data(11, NOW + 60)), a))
+        self.assertTrue(core.should_record(core.history_record(self.data(10, NOW + core.HISTORY_HEARTBEAT)), a))
+        self.assertFalse(core.should_record(None, a))
+
+    def test_append_read_and_rotate(self):
+        saved = core.HISTORY_MAX_BYTES
+        core.HISTORY_MAX_BYTES = 200
+        try:
+            for i in range(10):
+                self.assertIsNone(core.append_history(core.history_record(self.data(i, NOW + i)), self.path))
+        finally:
+            core.HISTORY_MAX_BYTES = saved
+        self.assertTrue(self.path.with_name("h.jsonl.1").exists())
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write("not json\n")
+        recs = core.read_history(self.path)
+        self.assertEqual([r["t"] for r in recs], sorted(r["t"] for r in recs))
+        self.assertEqual(recs[-1]["w"]["five_hour"][0], 9)
+        self.assertTrue(all(r["t"] >= NOW + 5 for r in core.read_history(self.path, since=NOW + 5)))
+
+    def test_append_error_is_returned(self):
+        self.assertIn("История", core.append_history({"t": 1, "w": {}}, Path(self.tmp.name) / "no" / "h.jsonl"))
+
+
+class Alerts(unittest.TestCase):
+    def step(self, state, pct, kind="five_hour"):
+        return core.check_alerts([core.Window(kind, pct, NOW + 3600)], state)
+
+    def test_first_sight_is_silent(self):
+        msgs, st = self.step({}, 95)
+        self.assertEqual(msgs, [])
+        self.assertEqual(st["five_hour"]["level"], 90)
+
+    def test_thresholds_fire_once(self):
+        _, st = self.step({}, 50)
+        msgs, st = self.step(st, 81)
+        self.assertEqual(msgs, ["5 часов: израсходовано 81%"])
+        msgs, st = self.step(st, 85)
+        self.assertEqual(msgs, [])
+        msgs, st = self.step(st, 97)  # сразу через оба порога — одно уведомление
+        self.assertEqual(len(msgs), 1)
+        msgs, st = self.step(st, 99)
+        self.assertEqual(msgs, [])
+
+    def test_reset_after_threshold(self):
+        _, st = self.step({}, 50)
+        _, st = self.step(st, 92)
+        msgs, st = self.step(st, 0)
+        self.assertEqual(msgs, ["5 часов: лимит сброшен, сейчас 0%"])
+        msgs, st = self.step(st, 82)  # в новом окне пороги снова работают
+        self.assertEqual(len(msgs), 1)
+
+    def test_reset_of_low_window_is_silent(self):
+        _, st = self.step({}, 40)
+        msgs, _ = self.step(st, 0)
+        self.assertEqual(msgs, [])
+
+
 class Files(unittest.TestCase):
     def test_snapshot_roundtrip_and_errors(self):
         with tempfile.TemporaryDirectory() as t:

@@ -17,7 +17,7 @@
 | `test_core.py`, `test_widget_smoke.py` | unittest. Виджетный смоук-тест подменяет `tkinter` заглушкой (Dummy/Var), поэтому работает без дисплея. |
 | `README.md` | Инструкция для пользователя. |
 
-Тесты: `python -m unittest -q` (сейчас 39, все проходят). Запускать после любой правки.
+Тесты: `python -m unittest -q` (сейчас 55, все проходят). Запускать после любой правки.
 
 ## Источники данных (режимы `mode`)
 
@@ -46,7 +46,7 @@
 
 - Конфиг: `~/.claude-limits-widget.json`, значения по умолчанию — `DEFAULTS` в `limits_widget.py`
   (`view` bars/rings, `size` S/M/L, `theme` auto/dark/light, `accent`, `compact`, `pulse`, `snap`, `ghost`,
-  `reset_abs`, `rounded`, `auto_login`, `hidden`, `shown_extra`, `show_breakdown`, `alpha`, `topmost`, `x`, `y`).
+  `reset_abs`, `rounded`, `auto_login`, `pace`, `history`, `notify`, `hidden`, `shown_extra`, `show_breakdown`, `alpha`, `topmost`, `x`, `y`).
   Новый ключ добавлять в `DEFAULTS`, валидацию — в `load_config`.
 - Отрисовка: один `Canvas`, `render()` вызывает `_draw_header / _draw_bars | _draw_rings | _draw_compact /
   _draw_breakdown / _draw_context / _draw_note / _draw_login_button`. Кнопки на канвасе — через `_buttons`
@@ -76,11 +76,15 @@
 пульсация ≥90%, прилипание к краям, «призрак», абсолютное время сброса (клик), скруглённые углы,
 кнопка и авто-обновление входа, поддержка нескольких мониторов (прилипание + сохранение позиции).
 
+Этап 2: метка ровного темпа (`pace_percent`, длины окон в `DURATIONS`), прогноз исчерпания по среднему темпу
+с начала окна (`forecast_exhaust`, не раньше 5% окна), уведомления на 80/90% и о сбросе (`check_alerts`:
+первое появление окна молча, сброс = падение процента >10 пунктов после порога; показ — `show_toast`,
+`tk.Toplevel` + `tk.Label`), история `~/.claude-limits-history.jsonl` (`history_record`/`should_record`/
+`append_history`/`read_history`, ротация в `.1` после 1 МБ, heartbeat 30 мин). Проверено на реальном tkinter
+коротким скриптом (без ошибок в колбэках); вид на экране глазами ещё не смотрели.
+
 ## План (утверждён: «давай делать все, поэтапно»)
 
-- **Этап 2.** Маркер «ровного темпа» на шкале (где должна быть шкала при равномерном расходе), прогноз
-  исчерпания лимита, уведомления на 80/90% и при сбросе, файл истории замеров (например
-  `~/.claude-limits-history.jsonl`, с ротацией).
 - **Этап 3.** Карточка сессии Claude Code: расширить `limits_statusline.py` (модель, стоимость, время, контекст,
   доля попаданий в кэш, подсказка про `/compact`, несколько сессий) и показать в виджете.
 - **Этап 4.** Доли по моделям из `~/.claude/projects/*.jsonl` (только Code).

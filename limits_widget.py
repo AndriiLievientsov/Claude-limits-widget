@@ -4,6 +4,7 @@
 Правая кнопка: меню (источник, вид, размер, тема, компактный режим и т. д.).
 """
 import json
+import math
 import queue
 import sys
 import threading
@@ -20,7 +21,8 @@ DEFAULTS = {
     "hidden": [], "shown_extra": [], "show_breakdown": True,
     "view": "bars", "size": "M", "theme": "auto", "accent": "Зелёный",
     "compact": False, "pulse": True, "snap": True, "ghost": False,
-    "reset_abs": False, "rounded": False, "auto_login": True,
+    "reset_abs": False, "rounded": False, "auto_login": True, "pace": True,
+    "history": True, "notify": True,
 }
 
 PALETTES = {
@@ -34,6 +36,7 @@ STALE_SECONDS = 300
 AUTO_LOGIN_COOLDOWN, AUTO_LOGIN_MAX_FAILS = 1800, 3
 FILE_POLL_MS, LIVE_POLL_MS, REDRAW_MS, PULSE_MS = 5_000, 120_000, 30_000, 700
 GHOST_ALPHA = 0.35
+TOAST_MS = 10_000
 RED, AMBER = "#e5484d", "#f5a524"
 
 
@@ -178,6 +181,9 @@ class Widget:
         self.login_fails = 0
         self.last_login_try = 0.0
         self.login_results: "queue.Queue[tuple]" = queue.Queue()
+        self.last_hist = None  # последняя записанная строка истории
+        self.alert_state: dict = {}  # что уже сообщили по каждому окну
+        self.toast = None
         self._filter_vars: dict = {}
         self.theme_name = "dark"
         self.pal = PALETTES["dark"]
@@ -258,7 +264,10 @@ class Widget:
         self._check(m, "Компактный режим (разворачивается при наведении)", "compact")
         self._check(m, "Время сброса: точное («в 14:40»)", "reset_abs")
         self._check(m, "Неделя по продуктам", "show_breakdown")
+        self._check(m, "Темп и прогноз исчерпания", "pace")
         self._check(m, "Пульсация при 90% и выше", "pulse")
+        self._check(m, "Уведомлять о 80/90% и сбросе", "notify")
+        self._check(m, "Писать историю замеров", "history")
         self._check(m, "Автоматически обновлять вход в Live", "auto_login")
         m.add_separator()
         self._check(m, "Поверх всех окон", "topmost")
@@ -505,6 +514,9 @@ class Widget:
                     elif not res.error:
                         self.backoff = 0
                     self.next_live_at = time.time() + LIVE_POLL_MS / 1000 * (2 ** self.backoff)
+                self._record_history(res)
+                if not res.error:
+                    self._check_alerts(res)
                 # при ошибке оставляем прошлые цифры, но показываем причину
                 if res.error and self.data.windows:
                     res = core.Data(self.data.windows, self.data.context_percent,
@@ -521,6 +533,57 @@ class Widget:
         except queue.Empty:
             pass
         self.root.after(200, self._poll_results)
+
+    def _record_history(self, res) -> None:
+        if not self.cfg["history"]:
+            return
+        rec = core.history_record(res)
+        if core.should_record(rec, self.last_hist):
+            err = core.append_history(rec)
+            if err is None:
+                self.last_hist = rec
+
+    def _check_alerts(self, res) -> None:
+        windows = [w for w in res.windows if self._is_visible(w.kind)]
+        msgs, self.alert_state = core.check_alerts(windows, self.alert_state)
+        if msgs and self.cfg["notify"]:
+            self.show_toast(msgs)
+
+    def show_toast(self, lines: list) -> None:
+        """Маленькое окно рядом с виджетом; закрывается само или по клику."""
+        self._close_toast()
+        pal, px = self.pal, self.px
+        t = self.toast = tk.Toplevel(self.root)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(bg=AMBER)
+        label = tk.Label(t, text="\n".join(lines), justify="left", bg=pal["bg"], fg=pal["fg"],
+                         font=self.font(9, True), padx=px(10), pady=px(8), wraplength=px(250))
+        label.pack(padx=1, pady=1)
+        for widget in (t, label):
+            widget.bind("<Button-1>", lambda _e: self._close_toast())
+        t.update_idletasks()
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        th, gap = t.winfo_reqheight(), px(6)
+        rect = pick_monitor(self._monitors(), x + self.root.winfo_width() // 2, y)
+        ty = y + self.root.winfo_height() + gap
+        if ty + th > rect[3]:
+            ty = max(y - th - gap, rect[1])
+        t.geometry(f"+{x}+{ty}")
+        try:
+            self.root.bell()
+        except tk.TclError:
+            pass
+        t.after(TOAST_MS, lambda tw=t: self._close_toast(tw))
+
+    def _close_toast(self, only=None) -> None:
+        if self.toast is None or (only is not None and only is not self.toast):
+            return
+        try:
+            self.toast.destroy()
+        except tk.TclError:
+            pass
+        self.toast = None
 
     # ---------- обновление входа ----------
     def _maybe_auto_login(self) -> None:
@@ -602,12 +665,21 @@ class Widget:
             return core.format_reset_abs(w.resets_at, now)
         return core.format_reset(w.resets_at, now)
 
+    def _forecast_text(self, w, now: float) -> str:
+        if not self.cfg["pace"] or w.percent >= 100:
+            return ""
+        at = core.forecast_exhaust(w, now)
+        return f"При таком темпе кончится {core.format_reset_abs(at, now)}" if at else ""
+
     def _value_text(self, w) -> str:
         if w.limit_dollars is not None and w.used_dollars is not None:
             return f"${w.used_dollars:.0f} / ${w.limit_dollars:.0f}"
         return f"{max(w.percent, 0):.0f}%"
 
-    def _bar(self, x1, y, x2, height, pct, color) -> None:
+    def _pace(self, w, now: float):
+        return core.pace_percent(w, now) if self.cfg["pace"] else None
+
+    def _bar(self, x1, y, x2, height, pct, color, pace=None) -> None:
         c, pal = self.canvas, self.pal
         c.create_rectangle(x1, y, x2, y + height, fill=pal["track"], outline="")
         fill_w = (x2 - x1) * min(max(pct, 0), 100) / 100
@@ -617,6 +689,10 @@ class Widget:
             for t in (70, 90):
                 tx = x1 + (x2 - x1) * t / 100
                 c.create_line(tx, y, tx, y + height, fill=pal["bg"])
+        if pace is not None:  # где была бы шкала при ровном расходе
+            tx = x1 + (x2 - x1) * min(max(pace, 0), 100) / 100
+            c.create_line(tx, y - self.px(3), tx, y + height + self.px(3), fill=self._tint(pal["fg"]),
+                          width=max(self.px(2), 1))
 
     def render(self) -> None:
         cfg, d, pal, c = self.cfg, self.data, self.pal, self.canvas
@@ -678,8 +754,12 @@ class Widget:
             if reset:
                 right += f" · {reset}"
             c.create_text(W - PAD, y, anchor="ne", text=right, fill=col, font=self.font(9, True))
-            self._bar(PAD, y + px(20), W - PAD, px(6), w.percent, col)
+            self._bar(PAD, y + px(20), W - PAD, px(6), w.percent, col, self._pace(w, now))
             y += px(38)
+            warn = self._forecast_text(w, now)
+            if warn:
+                c.create_text(PAD, y - px(10), anchor="nw", text=warn, fill=self._tint(AMBER), font=self.font(8))
+                y += px(14)
         return y
 
     def _draw_rings(self, visible, y: int, now: float) -> int:
@@ -698,6 +778,14 @@ class Widget:
             extent = -min(max(w.percent, 0), 99.9) * 3.6
             if extent < 0:
                 c.create_arc(x1, y1, x2, y2, start=90, extent=extent, style="arc", outline=col, width=thick)
+            pace = self._pace(w, now)
+            if pace is not None:  # метка ровного темпа поперёк кольца
+                a = math.radians(90 - min(max(pace, 0), 100) * 3.6)
+                rin, rout = diam / 2 - thick / 2 - px(1), diam / 2 + thick / 2 + px(1)
+                cy = (y1 + y2) / 2
+                c.create_line(cx + rin * math.cos(a), cy - rin * math.sin(a),
+                              cx + rout * math.cos(a), cy - rout * math.sin(a),
+                              fill=self._tint(pal["fg"]), width=max(px(2), 1))
             center = f"${w.used_dollars:.0f}" if w.used_dollars is not None and w.limit_dollars is not None \
                 else f"{max(w.percent, 0):.0f}%"
             c.create_text(cx, (y1 + y2) / 2, text=center, fill=col, font=self.font(11, True))

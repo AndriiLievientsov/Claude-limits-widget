@@ -52,7 +52,7 @@ class Var:
 
 
 fake = types.ModuleType("tkinter")
-for cls in ("Tk", "Canvas", "Menu", "Toplevel", "Text", "Button"):
+for cls in ("Tk", "Canvas", "Menu", "Toplevel", "Text", "Button", "Label"):
     setattr(fake, cls, Dummy)
 fake.StringVar, fake.BooleanVar = Var, Var
 fake.TclError = type("TclError", (Exception,), {})
@@ -76,6 +76,7 @@ class Smoke(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         lw.CONFIG = Path(self.tmp.name) / "cfg.json"
         core.SNAPSHOT = Path(self.tmp.name) / "none.json"
+        core.HISTORY = Path(self.tmp.name) / "hist.jsonl"
         self.w = lw.Widget()
 
     def tearDown(self):
@@ -124,6 +125,57 @@ class Smoke(unittest.TestCase):
         self.w.render()
         self.assertIn("$100 / $100", " | ".join(self.texts()))
 
+    def test_pace_marker_and_forecast(self):
+        fast = core.Data([core.Window("five_hour", 60, time.time() + 4 * 3600)], updated_at=time.time())
+        self.w.data = fast
+        for view in ("bars", "rings"):
+            self.w.cfg.update(view=view, compact=False, pace=True)
+            self.w.canvas.calls.clear()
+            self.w.render()
+            lines = [n for n, a, k in self.w.canvas.calls if n == "create_line"]
+            self.assertTrue(lines, view)
+        self.w.cfg["view"] = "bars"
+        self.w.render()
+        self.assertIn("кончится", " | ".join(self.texts()))
+        self.w.cfg["pace"] = False
+        self.w.canvas.calls.clear()
+        self.w.render()
+        self.assertNotIn("кончится", " | ".join(self.texts()))
+
+    def test_poll_writes_history_once_per_snapshot(self):
+        self.w.cfg["history"] = True
+        for res in (DATA, DATA, core.Data(error="Нет связи")):
+            self.w.results.put(res)
+        self.w._poll_results()
+        self.assertEqual(len(core.read_history(core.HISTORY)), 1)
+        self.w.cfg["history"] = False
+        self.w.results.put(core.Data(DATA.windows, updated_at=NOW + 5000))
+        self.w._poll_results()
+        self.assertEqual(len(core.read_history(core.HISTORY)), 1)
+
+    def test_alerts_show_toast_once(self):
+        shown = []
+        self.w.show_toast = shown.append
+        self.w.cfg["notify"] = True
+        for pct in (50, 85, 86):
+            self.w.results.put(core.Data([core.Window("five_hour", pct, NOW + 3600)], updated_at=NOW + pct))
+            self.w._poll_results()
+        self.assertEqual(shown, [["5 часов: израсходовано 85%"]])
+        self.w.cfg["notify"] = False
+        self.w.results.put(core.Data([core.Window("five_hour", 95, NOW + 3600)], updated_at=NOW + 95))
+        self.w._poll_results()
+        self.assertEqual(len(shown), 1)
+
+    def test_toast_opens_and_closes(self):
+        self.w.show_toast(["Неделя: израсходовано 90%"])
+        first = self.w.toast
+        self.assertIsNotNone(first)
+        self.w.show_toast(["второе"])  # новое заменяет старое
+        self.w._close_toast(first)  # таймер старого не закрывает новое
+        self.assertIsNotNone(self.w.toast)
+        self.w._close_toast()
+        self.assertIsNone(self.w.toast)
+
     def test_click_toggles_reset_format_and_drag_does_not(self):
         e = types.SimpleNamespace(x_root=100, y_root=100)
         before = self.w.cfg["reset_abs"]
@@ -137,7 +189,7 @@ class Smoke(unittest.TestCase):
         self.assertEqual(mid, self.w.cfg["reset_abs"])
 
     def test_menu_actions(self):
-        for key in ("compact", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
+        for key in ("compact", "pace", "history", "notify", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
             self.w._vars[key].set(not self.w.cfg[key])
             self.w._toggled(key)
         for key, value in (("view", "rings"), ("size", "L"), ("theme", "light"), ("accent", "Синий"),
@@ -169,6 +221,7 @@ class LoginButton(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         lw.CONFIG = Path(self.tmp.name) / "cfg.json"
         core.SNAPSHOT = Path(self.tmp.name) / "none.json"
+        core.HISTORY = Path(self.tmp.name) / "hist.jsonl"
         self.calls = []
         self._saved = core.refresh_login
         core.refresh_login = lambda: (self.calls.append(1) or (True, "Вход обновлён"))
@@ -285,6 +338,7 @@ class Monitors(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         lw.CONFIG = Path(tmp.name) / "cfg.json"
         core.SNAPSHOT = Path(tmp.name) / "none.json"
+        core.HISTORY = Path(tmp.name) / "hist.jsonl"
         saved = lw.monitor_rects
         lw.monitor_rects = lambda: [self.PRIMARY, self.RIGHT]
         try:

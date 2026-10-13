@@ -15,6 +15,9 @@ CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude
 SNAPSHOT = CLAUDE_DIR / "limits-snapshot.json"
 CREDENTIALS = CLAUDE_DIR / ".credentials.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+HISTORY = Path.home() / ".claude-limits-history.jsonl"
+HISTORY_MAX_BYTES = 1_000_000  # дальше файл уезжает в .1, старый .1 удаляется
+HISTORY_HEARTBEAT = 1800  # даже без изменений пишем замер раз в 30 мин
 
 LABELS = {
     "five_hour": "5 часов",
@@ -226,6 +229,121 @@ def format_reset(resets_at, now: float | None = None) -> str:
     if hours < 48:
         return f"{hours} ч {m:02d} мин"
     return f"{round(hours / 24)} дн"
+
+
+# ---------- уведомления ----------
+ALERT_LEVELS = (80, 90)
+RESET_DROP = 10  # процент внутри окна не падает; падение больше чем на 10 пунктов значит сброс
+
+
+def check_alerts(windows: list, state: dict, levels=ALERT_LEVELS):
+    """Сравнивает окна с прошлым состоянием. Возвращает (тексты уведомлений, новое состояние).
+
+    Первое появление окна запоминается молча (не шумим при запуске виджета). О сбросе сообщаем,
+    только если окно до этого переходило порог: сбросы почти пустых окон не интересны.
+    """
+    msgs, new = [], dict(state)
+    for w in windows:
+        level = max((lv for lv in levels if w.percent >= lv), default=0)
+        prev = state.get(w.kind)
+        if prev is not None:
+            if prev["level"] and w.percent < prev["pct"] - RESET_DROP:
+                msgs.append(f"{label_for(w.kind)}: лимит сброшен, сейчас {w.percent:.0f}%")
+            elif level > prev["level"]:
+                msgs.append(f"{label_for(w.kind)}: израсходовано {w.percent:.0f}%")
+        new[w.kind] = {"level": level, "pct": w.percent}
+    return msgs, new
+
+
+# ---------- история замеров ----------
+def history_record(data: Data, now: float | None = None):
+    """Строка истории: время замера и {окно: [процент, сброс]}; None, если писать нечего."""
+    if data.error or not data.windows:
+        return None
+    t = data.updated_at if data.updated_at is not None else (now if now is not None else time.time())
+    return {"t": round(t, 1), "w": {w.kind: [round(w.percent, 2), w.resets_at and round(w.resets_at)]
+                                    for w in data.windows}}
+
+
+def should_record(rec, last) -> bool:
+    """Пишем, если замер новый и цифры поменялись, либо прошло HISTORY_HEARTBEAT."""
+    if rec is None:
+        return False
+    if last is None:
+        return True
+    if rec["t"] <= last["t"]:
+        return False  # тот же снимок прочитан ещё раз
+    return rec["w"] != last["w"] or rec["t"] - last["t"] >= HISTORY_HEARTBEAT
+
+
+def append_history(rec: dict, path: Path | None = None) -> str | None:
+    """Дописывает строку в jsonl с ротацией. Возвращает текст ошибки или None."""
+    path = path or HISTORY
+    try:
+        if path.exists() and path.stat().st_size > HISTORY_MAX_BYTES:
+            os.replace(path, path.with_name(path.name + ".1"))
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError as e:
+        return f"История не записана: {e}"
+    return None
+
+
+def read_history(path: Path | None = None, since: float = 0) -> list:
+    """Замеры не старше since из файла и его архива .1, по времени; битые строки пропускаются."""
+    path = path or HISTORY
+    out = []
+    for p in (path.with_name(path.name + ".1"), path):
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and isinstance(rec.get("t"), (int, float)) and rec["t"] >= since \
+                    and isinstance(rec.get("w"), dict):
+                out.append(rec)
+    out.sort(key=lambda r: r["t"])
+    return out
+
+
+# ---------- темп и прогноз ----------
+DURATIONS = {"five_hour": 5 * 3600, "seven_day": 7 * 86400, "seven_day_opus": 7 * 86400,
+             "seven_day_sonnet": 7 * 86400}
+MIN_ELAPSED_SHARE = 0.05  # раньше 5% окна прогноз слишком шумный
+
+
+def window_elapsed(w: Window, now: float | None = None):
+    """(прошло секунд, длина окна) или None, если длина окна или время сброса неизвестны."""
+    dur = DURATIONS.get(w.kind)
+    if not dur or w.resets_at is None:
+        return None
+    now = now if now is not None else time.time()
+    return min(max(dur - (w.resets_at - now), 0.0), float(dur)), dur
+
+
+def pace_percent(w: Window, now: float | None = None):
+    """Где была бы шкала при ровном расходе: доля прошедшего времени окна, 0–100."""
+    el = window_elapsed(w, now)
+    return None if el is None else el[0] / el[1] * 100
+
+
+def forecast_exhaust(w: Window, now: float | None = None):
+    """Когда лимит кончится при среднем темпе с начала окна (unix-секунды) или None, если хватит до сброса."""
+    now = now if now is not None else time.time()
+    el = window_elapsed(w, now)
+    if el is None or w.percent <= 0:
+        return None
+    elapsed, dur = el
+    if w.percent >= 100:
+        return now
+    if elapsed < dur * MIN_ELAPSED_SHARE:
+        return None
+    at = now + (100 - w.percent) * elapsed / w.percent
+    return at if at < w.resets_at else None
 
 
 GREEN = "#30a46c"
