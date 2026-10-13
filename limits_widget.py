@@ -22,7 +22,7 @@ DEFAULTS = {
     "view": "bars", "size": "M", "theme": "auto", "accent": "Зелёный",
     "compact": False, "pulse": True, "snap": True, "ghost": False,
     "reset_abs": False, "rounded": False, "auto_login": True, "pace": True,
-    "history": True,
+    "history": True, "notify": True,
 }
 
 PALETTES = {
@@ -36,6 +36,7 @@ STALE_SECONDS = 300
 AUTO_LOGIN_COOLDOWN, AUTO_LOGIN_MAX_FAILS = 1800, 3
 FILE_POLL_MS, LIVE_POLL_MS, REDRAW_MS, PULSE_MS = 5_000, 120_000, 30_000, 700
 GHOST_ALPHA = 0.35
+TOAST_MS = 10_000
 RED, AMBER = "#e5484d", "#f5a524"
 
 
@@ -181,6 +182,8 @@ class Widget:
         self.last_login_try = 0.0
         self.login_results: "queue.Queue[tuple]" = queue.Queue()
         self.last_hist = None  # последняя записанная строка истории
+        self.alert_state: dict = {}  # что уже сообщили по каждому окну
+        self.toast = None
         self._filter_vars: dict = {}
         self.theme_name = "dark"
         self.pal = PALETTES["dark"]
@@ -263,6 +266,7 @@ class Widget:
         self._check(m, "Неделя по продуктам", "show_breakdown")
         self._check(m, "Темп и прогноз исчерпания", "pace")
         self._check(m, "Пульсация при 90% и выше", "pulse")
+        self._check(m, "Уведомлять о 80/90% и сбросе", "notify")
         self._check(m, "Писать историю замеров", "history")
         self._check(m, "Автоматически обновлять вход в Live", "auto_login")
         m.add_separator()
@@ -511,6 +515,8 @@ class Widget:
                         self.backoff = 0
                     self.next_live_at = time.time() + LIVE_POLL_MS / 1000 * (2 ** self.backoff)
                 self._record_history(res)
+                if not res.error:
+                    self._check_alerts(res)
                 # при ошибке оставляем прошлые цифры, но показываем причину
                 if res.error and self.data.windows:
                     res = core.Data(self.data.windows, self.data.context_percent,
@@ -536,6 +542,48 @@ class Widget:
             err = core.append_history(rec)
             if err is None:
                 self.last_hist = rec
+
+    def _check_alerts(self, res) -> None:
+        windows = [w for w in res.windows if self._is_visible(w.kind)]
+        msgs, self.alert_state = core.check_alerts(windows, self.alert_state)
+        if msgs and self.cfg["notify"]:
+            self.show_toast(msgs)
+
+    def show_toast(self, lines: list) -> None:
+        """Маленькое окно рядом с виджетом; закрывается само или по клику."""
+        self._close_toast()
+        pal, px = self.pal, self.px
+        t = self.toast = tk.Toplevel(self.root)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(bg=AMBER)
+        label = tk.Label(t, text="\n".join(lines), justify="left", bg=pal["bg"], fg=pal["fg"],
+                         font=self.font(9, True), padx=px(10), pady=px(8), wraplength=px(250))
+        label.pack(padx=1, pady=1)
+        for widget in (t, label):
+            widget.bind("<Button-1>", lambda _e: self._close_toast())
+        t.update_idletasks()
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        th, gap = t.winfo_reqheight(), px(6)
+        rect = pick_monitor(self._monitors(), x + self.root.winfo_width() // 2, y)
+        ty = y + self.root.winfo_height() + gap
+        if ty + th > rect[3]:
+            ty = max(y - th - gap, rect[1])
+        t.geometry(f"+{x}+{ty}")
+        try:
+            self.root.bell()
+        except tk.TclError:
+            pass
+        t.after(TOAST_MS, lambda tw=t: self._close_toast(tw))
+
+    def _close_toast(self, only=None) -> None:
+        if self.toast is None or (only is not None and only is not self.toast):
+            return
+        try:
+            self.toast.destroy()
+        except tk.TclError:
+            pass
+        self.toast = None
 
     # ---------- обновление входа ----------
     def _maybe_auto_login(self) -> None:

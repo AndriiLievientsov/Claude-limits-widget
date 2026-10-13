@@ -52,7 +52,7 @@ class Var:
 
 
 fake = types.ModuleType("tkinter")
-for cls in ("Tk", "Canvas", "Menu", "Toplevel", "Text", "Button"):
+for cls in ("Tk", "Canvas", "Menu", "Toplevel", "Text", "Button", "Label"):
     setattr(fake, cls, Dummy)
 fake.StringVar, fake.BooleanVar = Var, Var
 fake.TclError = type("TclError", (Exception,), {})
@@ -153,6 +153,29 @@ class Smoke(unittest.TestCase):
         self.w._poll_results()
         self.assertEqual(len(core.read_history(core.HISTORY)), 1)
 
+    def test_alerts_show_toast_once(self):
+        shown = []
+        self.w.show_toast = shown.append
+        self.w.cfg["notify"] = True
+        for pct in (50, 85, 86):
+            self.w.results.put(core.Data([core.Window("five_hour", pct, NOW + 3600)], updated_at=NOW + pct))
+            self.w._poll_results()
+        self.assertEqual(shown, [["5 часов: израсходовано 85%"]])
+        self.w.cfg["notify"] = False
+        self.w.results.put(core.Data([core.Window("five_hour", 95, NOW + 3600)], updated_at=NOW + 95))
+        self.w._poll_results()
+        self.assertEqual(len(shown), 1)
+
+    def test_toast_opens_and_closes(self):
+        self.w.show_toast(["Неделя: израсходовано 90%"])
+        first = self.w.toast
+        self.assertIsNotNone(first)
+        self.w.show_toast(["второе"])  # новое заменяет старое
+        self.w._close_toast(first)  # таймер старого не закрывает новое
+        self.assertIsNotNone(self.w.toast)
+        self.w._close_toast()
+        self.assertIsNone(self.w.toast)
+
     def test_click_toggles_reset_format_and_drag_does_not(self):
         e = types.SimpleNamespace(x_root=100, y_root=100)
         before = self.w.cfg["reset_abs"]
@@ -166,7 +189,7 @@ class Smoke(unittest.TestCase):
         self.assertEqual(mid, self.w.cfg["reset_abs"])
 
     def test_menu_actions(self):
-        for key in ("compact", "pace", "history", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
+        for key in ("compact", "pace", "history", "notify", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
             self.w._vars[key].set(not self.w.cfg[key])
             self.w._toggled(key)
         for key, value in (("view", "rings"), ("size", "L"), ("theme", "light"), ("accent", "Синий"),
