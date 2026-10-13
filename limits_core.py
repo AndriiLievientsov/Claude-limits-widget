@@ -231,6 +231,30 @@ def format_reset(resets_at, now: float | None = None) -> str:
     return f"{round(hours / 24)} дн"
 
 
+# ---------- уведомления ----------
+ALERT_LEVELS = (80, 90)
+RESET_DROP = 10  # процент внутри окна не падает; падение больше чем на 10 пунктов значит сброс
+
+
+def check_alerts(windows: list, state: dict, levels=ALERT_LEVELS):
+    """Сравнивает окна с прошлым состоянием. Возвращает (тексты уведомлений, новое состояние).
+
+    Первое появление окна запоминается молча (не шумим при запуске виджета). О сбросе сообщаем,
+    только если окно до этого переходило порог: сбросы почти пустых окон не интересны.
+    """
+    msgs, new = [], dict(state)
+    for w in windows:
+        level = max((lv for lv in levels if w.percent >= lv), default=0)
+        prev = state.get(w.kind)
+        if prev is not None:
+            if prev["level"] and w.percent < prev["pct"] - RESET_DROP:
+                msgs.append(f"{label_for(w.kind)}: лимит сброшен, сейчас {w.percent:.0f}%")
+            elif level > prev["level"]:
+                msgs.append(f"{label_for(w.kind)}: израсходовано {w.percent:.0f}%")
+        new[w.kind] = {"level": level, "pct": w.percent}
+    return msgs, new
+
+
 # ---------- история замеров ----------
 def history_record(data: Data, now: float | None = None):
     """Строка истории: время замера и {окно: [процент, сброс]}; None, если писать нечего."""

@@ -241,6 +241,40 @@ class History(unittest.TestCase):
         self.assertIn("История", core.append_history({"t": 1, "w": {}}, Path(self.tmp.name) / "no" / "h.jsonl"))
 
 
+class Alerts(unittest.TestCase):
+    def step(self, state, pct, kind="five_hour"):
+        return core.check_alerts([core.Window(kind, pct, NOW + 3600)], state)
+
+    def test_first_sight_is_silent(self):
+        msgs, st = self.step({}, 95)
+        self.assertEqual(msgs, [])
+        self.assertEqual(st["five_hour"]["level"], 90)
+
+    def test_thresholds_fire_once(self):
+        _, st = self.step({}, 50)
+        msgs, st = self.step(st, 81)
+        self.assertEqual(msgs, ["5 часов: израсходовано 81%"])
+        msgs, st = self.step(st, 85)
+        self.assertEqual(msgs, [])
+        msgs, st = self.step(st, 97)  # сразу через оба порога — одно уведомление
+        self.assertEqual(len(msgs), 1)
+        msgs, st = self.step(st, 99)
+        self.assertEqual(msgs, [])
+
+    def test_reset_after_threshold(self):
+        _, st = self.step({}, 50)
+        _, st = self.step(st, 92)
+        msgs, st = self.step(st, 0)
+        self.assertEqual(msgs, ["5 часов: лимит сброшен, сейчас 0%"])
+        msgs, st = self.step(st, 82)  # в новом окне пороги снова работают
+        self.assertEqual(len(msgs), 1)
+
+    def test_reset_of_low_window_is_silent(self):
+        _, st = self.step({}, 40)
+        msgs, _ = self.step(st, 0)
+        self.assertEqual(msgs, [])
+
+
 class Files(unittest.TestCase):
     def test_snapshot_roundtrip_and_errors(self):
         with tempfile.TemporaryDirectory() as t:
