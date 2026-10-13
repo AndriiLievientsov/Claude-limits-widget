@@ -15,6 +15,9 @@ CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude
 SNAPSHOT = CLAUDE_DIR / "limits-snapshot.json"
 CREDENTIALS = CLAUDE_DIR / ".credentials.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+HISTORY = Path.home() / ".claude-limits-history.jsonl"
+HISTORY_MAX_BYTES = 1_000_000  # дальше файл уезжает в .1, старый .1 удаляется
+HISTORY_HEARTBEAT = 1800  # даже без изменений пишем замер раз в 30 мин
 
 LABELS = {
     "five_hour": "5 часов",
@@ -226,6 +229,61 @@ def format_reset(resets_at, now: float | None = None) -> str:
     if hours < 48:
         return f"{hours} ч {m:02d} мин"
     return f"{round(hours / 24)} дн"
+
+
+# ---------- история замеров ----------
+def history_record(data: Data, now: float | None = None):
+    """Строка истории: время замера и {окно: [процент, сброс]}; None, если писать нечего."""
+    if data.error or not data.windows:
+        return None
+    t = data.updated_at if data.updated_at is not None else (now if now is not None else time.time())
+    return {"t": round(t, 1), "w": {w.kind: [round(w.percent, 2), w.resets_at and round(w.resets_at)]
+                                    for w in data.windows}}
+
+
+def should_record(rec, last) -> bool:
+    """Пишем, если замер новый и цифры поменялись, либо прошло HISTORY_HEARTBEAT."""
+    if rec is None:
+        return False
+    if last is None:
+        return True
+    if rec["t"] <= last["t"]:
+        return False  # тот же снимок прочитан ещё раз
+    return rec["w"] != last["w"] or rec["t"] - last["t"] >= HISTORY_HEARTBEAT
+
+
+def append_history(rec: dict, path: Path | None = None) -> str | None:
+    """Дописывает строку в jsonl с ротацией. Возвращает текст ошибки или None."""
+    path = path or HISTORY
+    try:
+        if path.exists() and path.stat().st_size > HISTORY_MAX_BYTES:
+            os.replace(path, path.with_name(path.name + ".1"))
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+    except OSError as e:
+        return f"История не записана: {e}"
+    return None
+
+
+def read_history(path: Path | None = None, since: float = 0) -> list:
+    """Замеры не старше since из файла и его архива .1, по времени; битые строки пропускаются."""
+    path = path or HISTORY
+    out = []
+    for p in (path.with_name(path.name + ".1"), path):
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and isinstance(rec.get("t"), (int, float)) and rec["t"] >= since \
+                    and isinstance(rec.get("w"), dict):
+                out.append(rec)
+    out.sort(key=lambda r: r["t"])
+    return out
 
 
 # ---------- темп и прогноз ----------

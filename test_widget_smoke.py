@@ -76,6 +76,7 @@ class Smoke(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         lw.CONFIG = Path(self.tmp.name) / "cfg.json"
         core.SNAPSHOT = Path(self.tmp.name) / "none.json"
+        core.HISTORY = Path(self.tmp.name) / "hist.jsonl"
         self.w = lw.Widget()
 
     def tearDown(self):
@@ -141,6 +142,17 @@ class Smoke(unittest.TestCase):
         self.w.render()
         self.assertNotIn("кончится", " | ".join(self.texts()))
 
+    def test_poll_writes_history_once_per_snapshot(self):
+        self.w.cfg["history"] = True
+        for res in (DATA, DATA, core.Data(error="Нет связи")):
+            self.w.results.put(res)
+        self.w._poll_results()
+        self.assertEqual(len(core.read_history(core.HISTORY)), 1)
+        self.w.cfg["history"] = False
+        self.w.results.put(core.Data(DATA.windows, updated_at=NOW + 5000))
+        self.w._poll_results()
+        self.assertEqual(len(core.read_history(core.HISTORY)), 1)
+
     def test_click_toggles_reset_format_and_drag_does_not(self):
         e = types.SimpleNamespace(x_root=100, y_root=100)
         before = self.w.cfg["reset_abs"]
@@ -154,7 +166,7 @@ class Smoke(unittest.TestCase):
         self.assertEqual(mid, self.w.cfg["reset_abs"])
 
     def test_menu_actions(self):
-        for key in ("compact", "pace", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
+        for key in ("compact", "pace", "history", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
             self.w._vars[key].set(not self.w.cfg[key])
             self.w._toggled(key)
         for key, value in (("view", "rings"), ("size", "L"), ("theme", "light"), ("accent", "Синий"),
@@ -186,6 +198,7 @@ class LoginButton(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         lw.CONFIG = Path(self.tmp.name) / "cfg.json"
         core.SNAPSHOT = Path(self.tmp.name) / "none.json"
+        core.HISTORY = Path(self.tmp.name) / "hist.jsonl"
         self.calls = []
         self._saved = core.refresh_login
         core.refresh_login = lambda: (self.calls.append(1) or (True, "Вход обновлён"))
@@ -302,6 +315,7 @@ class Monitors(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         lw.CONFIG = Path(tmp.name) / "cfg.json"
         core.SNAPSHOT = Path(tmp.name) / "none.json"
+        core.HISTORY = Path(tmp.name) / "hist.jsonl"
         saved = lw.monitor_rects
         lw.monitor_rects = lambda: [self.PRIMARY, self.RIGHT]
         try:

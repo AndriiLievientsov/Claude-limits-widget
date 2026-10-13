@@ -22,6 +22,7 @@ DEFAULTS = {
     "view": "bars", "size": "M", "theme": "auto", "accent": "Зелёный",
     "compact": False, "pulse": True, "snap": True, "ghost": False,
     "reset_abs": False, "rounded": False, "auto_login": True, "pace": True,
+    "history": True,
 }
 
 PALETTES = {
@@ -179,6 +180,7 @@ class Widget:
         self.login_fails = 0
         self.last_login_try = 0.0
         self.login_results: "queue.Queue[tuple]" = queue.Queue()
+        self.last_hist = None  # последняя записанная строка истории
         self._filter_vars: dict = {}
         self.theme_name = "dark"
         self.pal = PALETTES["dark"]
@@ -261,6 +263,7 @@ class Widget:
         self._check(m, "Неделя по продуктам", "show_breakdown")
         self._check(m, "Темп и прогноз исчерпания", "pace")
         self._check(m, "Пульсация при 90% и выше", "pulse")
+        self._check(m, "Писать историю замеров", "history")
         self._check(m, "Автоматически обновлять вход в Live", "auto_login")
         m.add_separator()
         self._check(m, "Поверх всех окон", "topmost")
@@ -507,6 +510,7 @@ class Widget:
                     elif not res.error:
                         self.backoff = 0
                     self.next_live_at = time.time() + LIVE_POLL_MS / 1000 * (2 ** self.backoff)
+                self._record_history(res)
                 # при ошибке оставляем прошлые цифры, но показываем причину
                 if res.error and self.data.windows:
                     res = core.Data(self.data.windows, self.data.context_percent,
@@ -523,6 +527,15 @@ class Widget:
         except queue.Empty:
             pass
         self.root.after(200, self._poll_results)
+
+    def _record_history(self, res) -> None:
+        if not self.cfg["history"]:
+            return
+        rec = core.history_record(res)
+        if core.should_record(rec, self.last_hist):
+            err = core.append_history(rec)
+            if err is None:
+                self.last_hist = rec
 
     # ---------- обновление входа ----------
     def _maybe_auto_login(self) -> None:

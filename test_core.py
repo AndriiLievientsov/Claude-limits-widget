@@ -195,6 +195,52 @@ class Pace(unittest.TestCase):
         self.assertEqual(core.forecast_exhaust(self.win(100, self.H), NOW), NOW)
 
 
+class History(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "h.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def data(self, pct, t):
+        return core.Data([core.Window("five_hour", pct, NOW + 3600)], updated_at=t)
+
+    def test_record_shape_and_skips(self):
+        rec = core.history_record(self.data(12.345, NOW))
+        self.assertEqual(rec, {"t": NOW, "w": {"five_hour": [12.35, NOW + 3600]}})
+        self.assertIsNone(core.history_record(core.Data(error="x")))
+        self.assertIsNone(core.history_record(core.Data([core.Window("five_hour", 1, None)], error="429")))
+
+    def test_should_record(self):
+        a = core.history_record(self.data(10, NOW))
+        self.assertTrue(core.should_record(a, None))
+        self.assertFalse(core.should_record(a, a))  # тот же снимок
+        self.assertFalse(core.should_record(core.history_record(self.data(10, NOW + 60)), a))  # без изменений
+        self.assertTrue(core.should_record(core.history_record(self.data(11, NOW + 60)), a))
+        self.assertTrue(core.should_record(core.history_record(self.data(10, NOW + core.HISTORY_HEARTBEAT)), a))
+        self.assertFalse(core.should_record(None, a))
+
+    def test_append_read_and_rotate(self):
+        saved = core.HISTORY_MAX_BYTES
+        core.HISTORY_MAX_BYTES = 200
+        try:
+            for i in range(10):
+                self.assertIsNone(core.append_history(core.history_record(self.data(i, NOW + i)), self.path))
+        finally:
+            core.HISTORY_MAX_BYTES = saved
+        self.assertTrue(self.path.with_name("h.jsonl.1").exists())
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write("not json\n")
+        recs = core.read_history(self.path)
+        self.assertEqual([r["t"] for r in recs], sorted(r["t"] for r in recs))
+        self.assertEqual(recs[-1]["w"]["five_hour"][0], 9)
+        self.assertTrue(all(r["t"] >= NOW + 5 for r in core.read_history(self.path, since=NOW + 5)))
+
+    def test_append_error_is_returned(self):
+        self.assertIn("История", core.append_history({"t": 1, "w": {}}, Path(self.tmp.name) / "no" / "h.jsonl"))
+
+
 class Files(unittest.TestCase):
     def test_snapshot_roundtrip_and_errors(self):
         with tempfile.TemporaryDirectory() as t:
