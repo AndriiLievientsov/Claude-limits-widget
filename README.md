@@ -43,3 +43,7 @@ if ($j.statusLine) { Write-Host "statusLine уже настроена, ниче�
 
 ## Проверка
 `python -m unittest test_core test_widget_smoke`: разбор данных, чтение файлов, обновление входа и дымовой тест окна\n(на поддельном tkinter: ловит ошибки в коде, но внешний вид не проверяет).
+
+## Лицензия
+
+MIT, см. файл [LICENSE](LICENSE).
