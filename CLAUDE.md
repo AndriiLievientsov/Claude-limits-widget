@@ -102,7 +102,7 @@
 
 ## GitHub
 
-Репозиторий: https://github.com/AndriiLievientsov/Claude-limits-widget (публичный, пока только README).
+Репозиторий: https://github.com/AndriiLievientsov/Claude-limits-widget (публичный, в нём весь код проекта).
 Работать прямо в клоне: `git clone` в `D:\Claude\limits-widget` или добавить `origin` к существующей папке.
 Коммитить небольшими шагами (один этап — один-два коммита), перед коммитом гонять `python -m unittest -q`.
 Не коммитить токены, `~/.claude/*`, `limits-snapshot.json` и личный конфиг `~/.claude-limits-widget.json`
