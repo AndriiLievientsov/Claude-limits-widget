@@ -275,6 +275,75 @@ class Alerts(unittest.TestCase):
         self.assertEqual(msgs, [])
 
 
+class Sessions(unittest.TestCase):
+    RAW = {"a": {"model": "Opus", "cost_usd": 1.5, "duration_ms": 3_900_000, "context_percent": 42,
+                 "cache_read": 900, "cache_create": 60, "input_tokens": 40, "folder": "proj",
+                 "updated_at": NOW - 10},
+           "b": {"model": "Haiku", "updated_at": NOW - 100},
+           "old": {"model": "X", "updated_at": NOW - core.SESSION_TTL - 1},
+           "bad": "x", "nots": {"model": "Y"}}
+
+    def test_parse_sorted_and_filtered(self):
+        out = core.parse_sessions(self.RAW, NOW)
+        self.assertEqual([x.id for x in out], ["a", "b"])
+        a = out[0]
+        self.assertEqual((a.model, a.cost_usd, a.folder), ("Opus", 1.5, "proj"))
+        self.assertAlmostEqual(a.cache_percent, 90.0)
+        self.assertIsNone(out[1].cache_percent)
+
+    def test_parse_garbage(self):
+        self.assertEqual(core.parse_sessions(None, NOW), [])
+        self.assertEqual(core.parse_sessions([1], NOW), [])
+
+    def test_cache_percent(self):
+        self.assertIsNone(core.cache_percent(None, 5, 5))
+        self.assertIsNone(core.cache_percent(0, 0, 0))
+        self.assertEqual(core.cache_percent(50, 25, 25), 50)
+
+    def test_duration(self):
+        self.assertEqual(core.format_duration(30_000), "<1 мин")
+        self.assertEqual(core.format_duration(42 * 60000), "42 мин")
+        self.assertEqual(core.format_duration(65 * 60000), "1 ч 05 мин")
+        self.assertEqual(core.format_duration(None), "")
+
+    def test_compact_hint(self):
+        self.assertIsNone(core.compact_hint(None))
+        self.assertIsNone(core.compact_hint(50))
+        self.assertIn("compact", core.compact_hint(75))
+        self.assertIn("clear", core.compact_hint(95))
+
+    def test_snapshot_carries_sessions(self):
+        with tempfile.TemporaryDirectory() as t:
+            core.SNAPSHOT = Path(t) / "s.json"
+            core.SNAPSHOT.write_text(json.dumps({"saved_at": time.time(), "sessions": {"s": {
+                "model": "Opus", "updated_at": time.time()}},
+                "rate_limits": {"five_hour": {"used_percentage": 5, "resets_at": time.time() + 600}}}))
+            self.assertEqual([x.id for x in core.read_snapshot().sessions], ["s"])
+
+
+class Statusline(unittest.TestCase):
+    def test_build_session(self):
+        import limits_statusline as sl
+        s = sl.build_session({"session_id": "x", "model": {"display_name": "Opus 4"},
+                              "cost": {"total_cost_usd": 0.5, "total_duration_ms": 1000},
+                              "context_window": {"used_percentage": 12, "current_usage": {
+                                  "cache_read_input_tokens": 8, "input_tokens": 2}},
+                              "workspace": {"current_dir": "C:/a/proj"}}, NOW)
+        self.assertEqual((s["id"], s["model"], s["cost_usd"], s["cache_read"]), ("x", "Opus 4", 0.5, 8.0))
+        self.assertEqual(s["folder"], "proj")
+        self.assertIsNone(sl.build_session({}, NOW))
+        self.assertIsNone(sl.build_session({"session_id": "x", "cost": "bad"}, NOW)["cost_usd"])
+
+    def test_merge_limits_and_drops_old(self):
+        import limits_statusline as sl
+        old = {f"s{i}": {"id": f"s{i}", "updated_at": NOW - i} for i in range(7)}
+        old["stale"] = {"id": "stale", "updated_at": NOW - sl.SESSION_TTL - 5}
+        merged = sl.merge_sessions(old, {"id": "new", "updated_at": NOW}, NOW)
+        self.assertEqual(len(merged), sl.MAX_SESSIONS)
+        self.assertIn("new", merged); self.assertNotIn("stale", merged)
+        self.assertEqual(sl.merge_sessions(None, None, NOW), {})
+
+
 class Files(unittest.TestCase):
     def test_snapshot_roundtrip_and_errors(self):
         with tempfile.TemporaryDirectory() as t:
