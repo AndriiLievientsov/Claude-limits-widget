@@ -17,6 +17,8 @@ CREDENTIALS = CLAUDE_DIR / ".credentials.json"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 HISTORY = Path.home() / ".claude-limits-history.jsonl"
 HISTORY_MAX_BYTES = 1_000_000  # дальше файл уезжает в .1, старый .1 удаляется
+SESSION_TTL = 6 * 3600  # сессия без обновлений дольше этого не показывается
+COMPACT_WARN, COMPACT_CRITICAL = 70, 90  # пороги подсказки про /compact, % контекста
 HISTORY_HEARTBEAT = 1800  # даже без изменений пишем замер раз в 30 мин
 
 LABELS = {
@@ -60,6 +62,18 @@ class Share:
 
 
 @dataclass
+class Session:
+    id: str
+    model: str | None = None
+    cost_usd: float | None = None
+    duration_ms: float | None = None
+    context_percent: float | None = None
+    cache_percent: float | None = None  # доля чтения из кэша среди входных токенов последнего запроса
+    folder: str | None = None
+    updated_at: float | None = None
+
+
+@dataclass
 class Data:
     windows: list[Window] = field(default_factory=list)
     context_percent: float | None = None
@@ -68,6 +82,7 @@ class Data:
     raw: dict | None = None  # ответ целиком (без токена), для «Сырого ответа»
     breakdown: list = field(default_factory=list)  # доли недели по продуктам (Share)
     auth_error: bool = False  # проблема со входом (токен истёк, нет файла): лечится кнопкой «Обновить вход»
+    sessions: list = field(default_factory=list)  # карточки сессий Claude Code (Session), свежие первыми
 
 
 def parse_reset(value):
@@ -127,6 +142,59 @@ def parse_breakdown(body) -> list:
     return out
 
 
+def cache_percent(read, create, fresh):
+    """Доля токенов, прочитанных из кэша, среди всего входа запроса; None, если данных нет."""
+    parts = [v for v in (read, create, fresh) if isinstance(v, (int, float))]
+    total = sum(parts)
+    if not parts or total <= 0 or not isinstance(read, (int, float)):
+        return None
+    return read / total * 100
+
+
+def parse_sessions(raw, now: float | None = None) -> list:
+    """Сессии из снимка statusline (словарь id → поля), свежие первыми; протухшие (>6 ч) пропускаем."""
+    now = now if now is not None else time.time()
+    out = []
+    for sid, r in (raw.items() if isinstance(raw, dict) else []):
+        if not isinstance(r, dict):
+            continue
+        upd = r.get("updated_at")
+        if not isinstance(upd, (int, float)) or now - upd > SESSION_TTL:
+            continue
+
+        def num(key):
+            v = r.get(key)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        out.append(Session(str(sid), r.get("model") if isinstance(r.get("model"), str) else None,
+                           num("cost_usd"), num("duration_ms"), num("context_percent"),
+                           cache_percent(num("cache_read"), num("cache_create"), num("input_tokens")),
+                           r.get("folder") if isinstance(r.get("folder"), str) else None, float(upd)))
+    return sorted(out, key=lambda s: s.updated_at or 0, reverse=True)
+
+
+def format_duration(ms) -> str:
+    """«42 мин», «1 ч 05 мин», «<1 мин»."""
+    if not isinstance(ms, (int, float)) or ms < 0:
+        return ""
+    minutes = int(ms // 60000)
+    if minutes < 1:
+        return "<1 мин"
+    if minutes < 60:
+        return f"{minutes} мин"
+    return f"{minutes // 60} ч {minutes % 60:02d} мин"
+
+
+def compact_hint(context_percent) -> str | None:
+    """Подсказка про /compact, когда окно контекста почти заполнено."""
+    if not isinstance(context_percent, (int, float)):
+        return None
+    if context_percent >= COMPACT_CRITICAL:
+        return "Контекст почти полон — /compact или /clear"
+    if context_percent >= COMPACT_WARN:
+        return "Пора /compact"
+    return None
+
+
 def read_snapshot(now: float | None = None) -> Data:
     """Режим «файл»: данные, которые записал limits_statusline.py."""
     try:
@@ -138,8 +206,10 @@ def read_snapshot(now: float | None = None) -> Data:
     windows = parse_windows(raw.get("rate_limits") or {}, now)
     if not windows:
         return Data(updated_at=raw.get("saved_at"), context_percent=raw.get("context_percent"),
-                    error="В данных нет лимитов (нужна подписка Pro/Max и один ответ в Claude Code).")
-    return Data(windows, raw.get("context_percent"), raw.get("saved_at"), raw=raw.get("rate_limits"))
+                    error="В данных нет лимитов (нужна подписка Pro/Max и один ответ в Claude Code).",
+                    sessions=parse_sessions(raw.get("sessions"), now))
+    return Data(windows, raw.get("context_percent"), raw.get("saved_at"), raw=raw.get("rate_limits"),
+                sessions=parse_sessions(raw.get("sessions"), now))
 
 
 def read_token():

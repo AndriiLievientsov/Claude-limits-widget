@@ -68,7 +68,9 @@ DATA = core.Data(
     [core.Window("five_hour", 57, NOW + 3 * 3600), core.Window("seven_day", 95, NOW + 6 * 86400, "normal"),
      core.Window("iguana_necktie", 100, NOW + 24 * 86400, None, 100.28, 100.0)],
     context_percent=18, updated_at=NOW,
-    breakdown=[core.Share("claude_code", "Code", 17), core.Share("cowork", "Cowork", 83)])
+    breakdown=[core.Share("claude_code", "Code", 17), core.Share("cowork", "Cowork", 83)],
+    sessions=[core.Session("a", "Opus 4", 1.234, 3_900_000, 93, 87.0, "proj", NOW),
+              core.Session("b", "Haiku", 0.01, 60000, 10, None, None, NOW - 50)])
 
 
 class Smoke(unittest.TestCase):
@@ -99,6 +101,18 @@ class Smoke(unittest.TestCase):
             self.w.canvas.calls.clear()
             self.w.render()
             self.assertTrue(self.w.canvas.calls, (view, size, theme, compact, hover, rounded))
+
+    def test_session_card(self):
+        self.w.data = DATA
+        self.w.cfg["show_session"] = True
+        self.w.canvas.calls.clear(); self.w.render()
+        t = " | ".join(self.texts())
+        for part in ("Opus 4", "proj", "$1.23", "1 ч 05 мин", "Контекст 93%", "кэш 87%", "/compact", "Ещё сессий: 1"):
+            self.assertIn(part, t)
+        self.w.cfg["show_session"] = False
+        self.w.canvas.calls.clear(); self.w.render()
+        t = " | ".join(self.texts())
+        self.assertNotIn("Opus 4", t); self.assertIn("Контекст сессии 18%", t)
 
     def test_empty_and_error_states(self):
         for d in (core.Data(), core.Data(error="x"), core.Data([], None, None, "нет данных")):
@@ -189,7 +203,7 @@ class Smoke(unittest.TestCase):
         self.assertEqual(mid, self.w.cfg["reset_abs"])
 
     def test_menu_actions(self):
-        for key in ("compact", "pace", "history", "notify", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown"):
+        for key in ("compact", "pace", "history", "notify", "pulse", "snap", "ghost", "rounded", "topmost", "reset_abs", "show_breakdown", "show_session"):
             self.w._vars[key].set(not self.w.cfg[key])
             self.w._toggled(key)
         for key, value in (("view", "rings"), ("size", "L"), ("theme", "light"), ("accent", "Синий"),

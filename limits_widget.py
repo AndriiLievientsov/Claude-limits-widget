@@ -22,7 +22,7 @@ DEFAULTS = {
     "view": "bars", "size": "M", "theme": "auto", "accent": "Зелёный",
     "compact": False, "pulse": True, "snap": True, "ghost": False,
     "reset_abs": False, "rounded": False, "auto_login": True, "pace": True,
-    "history": True, "notify": True,
+    "history": True, "notify": True, "show_session": True,
 }
 
 PALETTES = {
@@ -264,6 +264,7 @@ class Widget:
         self._check(m, "Компактный режим (разворачивается при наведении)", "compact")
         self._check(m, "Время сброса: точное («в 14:40»)", "reset_abs")
         self._check(m, "Неделя по продуктам", "show_breakdown")
+        self._check(m, "Карточка сессии Claude Code", "show_session")
         self._check(m, "Темп и прогноз исчерпания", "pace")
         self._check(m, "Пульсация при 90% и выше", "pulse")
         self._check(m, "Уведомлять о 80/90% и сбросе", "notify")
@@ -521,7 +522,7 @@ class Widget:
                 if res.error and self.data.windows:
                     res = core.Data(self.data.windows, self.data.context_percent,
                                     self.data.updated_at, res.error, self.data.raw, self.data.breakdown,
-                                    res.auth_error)
+                                    res.auth_error, self.data.sessions)
                 self.data = res
                 self._maybe_auto_login()
                 self.render()
@@ -713,7 +714,7 @@ class Widget:
             y = self._draw_header(y)
             y = self._draw_rings(visible, y, now) if cfg["view"] == "rings" else self._draw_bars(visible, y, now)
             y = self._draw_breakdown(y)
-            y = self._draw_context(y)
+            y = self._draw_session(y, now) if self._has_session(now) else self._draw_context(y)
             y = self._draw_note(y, now)
         height = max(y + self._PAD // 2, px(40))
 
@@ -834,6 +835,42 @@ class Widget:
         c.create_text(PAD, by + px(9), anchor="nw", width=inner, text=legend,
                       fill=self._tint(pal["fg"]), font=self.font(8))
         return y + px(46)
+
+    def _has_session(self, now: float) -> bool:
+        return bool(self.cfg["show_session"] and self.data.sessions)
+
+    def _draw_session(self, y: int, now: float) -> int:
+        """Карточка последней сессии Claude Code: модель, стоимость, время, контекст, кэш, подсказка."""
+        d, c, pal, px, W, PAD = self.data, self.canvas, self.pal, self.px, self._W, self._PAD
+        s = d.sessions[0]
+        title = "Сессия" + (f" · {s.model}" if s.model else "") + (f" · {s.folder}" if s.folder else "")
+        c.create_text(PAD, y - px(6), anchor="nw", width=W - 2 * PAD - px(90), text=title,
+                      fill=pal["dim"], font=self.font(8))
+        right = " · ".join(t for t in (f"${s.cost_usd:.2f}" if s.cost_usd is not None else "",
+                                       core.format_duration(s.duration_ms)) if t)
+        if right:
+            c.create_text(W - PAD, y - px(6), anchor="ne", text=right, fill=self._tint(pal["fg"]),
+                          font=self.font(8))
+        y += px(12)
+        if s.context_percent is not None:
+            col = self._tint(core.color_for(s.context_percent, None, ACCENTS[self.cfg["accent"]]))
+            self._bar(PAD, y, W - PAD, px(4), s.context_percent, col)
+            line = f"Контекст {s.context_percent:.0f}%"
+            if s.cache_percent is not None:
+                line += f" · кэш {s.cache_percent:.0f}%"
+            c.create_text(PAD, y + px(7), anchor="nw", text=line, fill=pal["dim"], font=self.font(8))
+            y += px(24)
+            hint = core.compact_hint(s.context_percent)
+            if hint:
+                c.create_text(PAD, y - px(4), anchor="nw", width=W - 2 * PAD, text=hint,
+                              fill=self._tint(AMBER), font=self.font(8))
+                y += px(14)
+        more = len(d.sessions) - 1
+        if more > 0:
+            c.create_text(PAD, y - px(4), anchor="nw", text=f"Ещё сессий: {more}", fill=pal["dim"],
+                          font=self.font(8))
+            y += px(14)
+        return y + px(2)
 
     def _draw_context(self, y: int) -> int:
         d, c, pal, px, PAD = self.data, self.canvas, self.pal, self.px, self._PAD
